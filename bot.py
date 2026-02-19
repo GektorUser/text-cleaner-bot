@@ -204,8 +204,7 @@ async def run_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logger.info(f"Web server started on port {port}")
-    # keep the server running forever
-    await asyncio.Event().wait()
+    return runner
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,11 +313,24 @@ async def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Запускаем polling в фоне
-    asyncio.create_task(app.run_polling())
+    # Запускаем веб-сервер
+    web_runner = await run_web_server()
 
-    # Запускаем веб-сервер (будет работать вечно)
-    await run_web_server()
+    # Запускаем бота
+    logger.info("Starting bot polling...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    try:
+        # Держим программу запущенной
+        await asyncio.Event().wait()
+    finally:
+        # Корректное завершение
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        await web_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
