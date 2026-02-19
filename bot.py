@@ -1,11 +1,12 @@
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import os
 import tempfile
+from aiohttp import web
 import pdfplumber
 import docx2txt
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,7 +89,6 @@ TEXTS = {
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_text(context: ContextTypes.DEFAULT_TYPE, key: str, **kwargs) -> str:
-    """Возвращает текст на языке пользователя (по умолчанию русский)"""
     lang = context.user_data.get('language', 'ru')
     text = TEXTS[lang].get(key, f"Missing translation: {key}")
     if kwargs:
@@ -190,9 +190,25 @@ async def process_file_background(update: Update, context: ContextTypes.DEFAULT_
         if os.path.exists(file_path):
             os.unlink(file_path)
 
-# ========== ОБРАБОТЧИКИ ==========
+# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
+async def handle_http(request):
+    return web.Response(text="Bot is running")
+
+async def run_web_server():
+    app_web = web.Application()
+    app_web.router.add_get('/', handle_http)
+    app_web.router.add_get('/ping', handle_http)
+    port = int(os.environ.get('PORT', 10000))
+    runner = web.AppRunner(app_web)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Web server started on port {port}")
+    # keep the server running forever
+    await asyncio.Event().wait()
+
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если язык ещё не выбран, показываем приветствие на двух языках и кнопки выбора
     if 'language' not in context.user_data:
         intro_text = (
             "👋 Hello! I'm a bot for cleaning text from hidden characters.\n"
@@ -209,7 +225,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(get_text(context, 'start'))
 
 async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /language для повторного выбора языка"""
     keyboard = [
         [InlineKeyboardButton("Русский", callback_data="lang_ru")],
         [InlineKeyboardButton("English", callback_data="lang_en")]
@@ -224,7 +239,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_text(context, 'help'))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если язык не выбран, предлагаем выбрать (с кратким сообщением)
     if 'language' not in context.user_data:
         await language_selection(update, context)
         return
@@ -248,7 +262,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если язык не выбран, предлагаем выбрать
     if 'language' not in context.user_data:
         await language_selection(update, context)
         return
@@ -282,16 +295,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data.startswith('lang_'):
-        lang = query.data.split('_')[1]  # 'ru' или 'en'
+        lang = query.data.split('_')[1]
         context.user_data['language'] = lang
         await query.edit_message_text(get_text(context, 'language_selected'))
-        # После выбора языка отправляем полное приветствие
         await query.message.reply_text(get_text(context, 'start'))
     elif query.data == "clean":
         await query.edit_message_text(get_text(context, 'clean_placeholder'))
 
-def main():
-    token = "8464092666:AAFMjdZKgy9D3yzcTo8aM2S33GornzPYZ4g"  # Твой токен
+# ========== ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ==========
+async def main():
+    token = os.environ.get('TELEGRAM_TOKEN', "8464092666:AAFMjdZKgy9D3yzcTo8aM2S33GornzPYZ4g")
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -301,8 +314,11 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    print("Бот запущен! Жду текст или файлы...")
-    app.run_polling()
+    # Запускаем polling в фоне
+    asyncio.create_task(app.run_polling())
+
+    # Запускаем веб-сервер (будет работать вечно)
+    await run_web_server()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
