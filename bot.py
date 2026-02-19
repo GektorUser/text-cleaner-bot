@@ -217,16 +217,19 @@ async def process_file_background(update: Update, context: ContextTypes.DEFAULT_
 
         hidden = count_hidden_chars(text)
         if hidden == 0:
+            # Файл чистый — показываем кнопку доната
+            donate_keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
+            reply_markup = InlineKeyboardMarkup(donate_keyboard)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=get_text(context, 'file_clean')
+                text=get_text(context, 'file_clean'),
+                reply_markup=reply_markup
             )
             return
 
         length = len(text)
         price = get_price_for_length(length)
 
-        # Сохраняем текст для последующей обработки (оплаты или бесплатной очистки)
         context.user_data['pending_text'] = text
         context.user_data['pending_price'] = price
         context.user_data['pending_length'] = length
@@ -241,7 +244,6 @@ async def process_file_background(update: Update, context: ContextTypes.DEFAULT_
             length=length
         )
 
-        # Если цена 0, сразу очищаем бесплатно
         if price == 0:
             cleaned = clean_text(text)
             await context.bot.send_message(
@@ -251,7 +253,6 @@ async def process_file_background(update: Update, context: ContextTypes.DEFAULT_
             context.user_data.pop('pending_text', None)
             return
 
-        # Иначе предлагаем оплатить
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply_text,
@@ -291,6 +292,7 @@ async def run_web_server():
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'language' not in context.user_data:
+        # Первый запуск — показываем выбор языка БЕЗ кнопки доната
         intro_text = (
             "👋 Hello! I'm a bot for cleaning text from hidden characters.\n"
             "👋 Привет! Я бот для очистки текста от скрытых символов.\n\n"
@@ -298,21 +300,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         keyboard = [
             [InlineKeyboardButton("Русский", callback_data="lang_ru")],
-            [InlineKeyboardButton("English", callback_data="lang_en")],
-            [InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]
+            [InlineKeyboardButton("English", callback_data="lang_en")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(intro_text, reply_markup=reply_markup)
     else:
-        keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(get_text(context, 'start'), reply_markup=reply_markup)
+        # Язык уже выбран — просто приветствие без кнопки доната
+        await update.message.reply_text(get_text(context, 'start'))
 
 async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Команда /language — только выбор языка, без доната
     keyboard = [
         [InlineKeyboardButton("Русский", callback_data="lang_ru")],
-        [InlineKeyboardButton("English", callback_data="lang_en")],
-        [InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]
+        [InlineKeyboardButton("English", callback_data="lang_en")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -321,9 +321,8 @@ async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(get_text(context, 'help'), reply_markup=reply_markup)
+    # Справка без кнопки доната
+    await update.message.reply_text(get_text(context, 'help'))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'language' not in context.user_data:
@@ -333,7 +332,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     hidden = count_hidden_chars(text)
     if hidden == 0:
-        await update.message.reply_text(get_text(context, 'text_clean'))
+        # Текст чистый — показываем кнопку доната
+        donate_keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
+        reply_markup = InlineKeyboardMarkup(donate_keyboard)
+        await update.message.reply_text(
+            get_text(context, 'text_clean'),
+            reply_markup=reply_markup
+        )
         return
 
     length = len(text)
@@ -407,10 +412,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = query.data.split('_')[1]
         context.user_data['language'] = lang
         await query.edit_message_text(get_text(context, 'language_selected'))
-        # После выбора языка показываем приветствие с кнопкой доната
-        keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text(get_text(context, 'start'), reply_markup=reply_markup)
+        # После выбора языка показываем приветствие без кнопки доната
+        await query.message.reply_text(get_text(context, 'start'))
         return
 
     if query.data == "donate":
@@ -431,7 +434,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith('donate_'):
         amount = int(query.data.split('_')[1])
-        # Создаём счёт на донат
         await context.bot.send_invoice(
             chat_id=query.message.chat_id,
             title="Поддержка автора",
@@ -441,7 +443,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             currency="XTR",
             prices=[LabeledPrice(label="Донат", amount=amount)]
         )
-        # Сообщение о создании счёта – не редактируем предыдущее
         return
 
     if query.data == "pay_clean":
@@ -463,10 +464,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "back":
-        # Возврат в главное меню
-        keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(get_text(context, 'start'), reply_markup=reply_markup)
+        # Возврат в главное меню (без кнопки доната)
+        await query.edit_message_text(get_text(context, 'start'))
         return
 
 async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
