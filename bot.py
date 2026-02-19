@@ -5,8 +5,11 @@ import tempfile
 from aiohttp import web
 import pdfplumber
 import docx2txt
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, CallbackQueryHandler, PreCheckoutQueryHandler
+)
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,6 +18,14 @@ logger = logging.getLogger(__name__)
 BIG_FILE_THRESHOLD = 5 * 1024 * 1024      # 5 МБ
 MAX_TELEGRAM_SIZE = 20 * 1024 * 1024       # 20 МБ
 
+# Цены в Stars (для разных диапазонов)
+PRICE_FREE_LIMIT = 500          # бесплатно до 500 знаков
+PRICE_TIER1_LIMIT = 1000         # 1 Star до 1000 знаков
+PRICE_TIER1 = 1
+PRICE_TIER2_LIMIT = 10000        # 10 Stars до 10000 знаков
+PRICE_TIER2 = 10
+PRICE_TIER3 = 50                 # 50 Stars свыше 10000 знаков
+
 # ========== СЛОВАРЬ ПЕРЕВОДОВ ==========
 TEXTS = {
     'ru': {
@@ -22,8 +33,12 @@ TEXTS = {
         'start': (
             "👋 Привет! Я бот для очистки текста от скрытых символов.\n\n"
             "📝 Отправь мне текст или файл (TXT, DOCX, PDF), и я покажу количество скрытых символов.\n\n"
-            "💰 Очистка текста — 10 Stars (до 1000 знаков)\n\n"
-            "📁 Файлы до 5 МБ обрабатываются быстро, от 5 до 20 МБ — в фоне (нужно подождать).\n"
+            "💰 Тарифы:\n"
+            "• Проверка и очистка до 500 знаков — **бесплатно**\n"
+            "• До 1000 знаков — 1 Star\n"
+            "• 1000–10000 знаков — 10 Stars\n"
+            "• Более 10000 знаков — 50 Stars\n\n"
+            "📁 Файлы до 5 МБ обрабатываются быстро, от 5 до 20 МБ — в фоне.\n"
             "❌ Файлы больше 20 МБ не принимаются из‑за ограничений Telegram.\n\n"
             "Используй /help для списка команд."
         ),
@@ -35,7 +50,10 @@ TEXTS = {
             "📌 Просто отправь текст или файл, и я проверю скрытые символы."
         ),
         'choose_language': '🌐 Пожалуйста, выберите язык:',
-        'file_too_big': '❌ Файл слишком большой (максимум 20 МБ). Пожалуйста, отправьте файл меньшего размера.',
+        'donate_button': '💖 Поддержать автора',
+        'donate_prompt': 'Выберите сумму доната в Stars (или нажмите /cancel для отмены):',
+        'donate_thanks': '🙏 Спасибо за поддержку! Вы подарили {amount} Stars.',
+        'file_too_big': '❌ Файл слишком большой (максимум 20 МБ).',
         'file_big_background': (
             "⏳ Файл большой (>5 МБ). Начинаю обработку в фоне, это может занять некоторое время.\n"
             "Я пришлю результат сюда, как только закончу."
@@ -43,9 +61,18 @@ TEXTS = {
         'file_processing': '⏳ Обрабатываю файл...',
         'text_clean': '✅ Текст чистый! Скрытых символов не найдено.',
         'file_clean': '✅ Файл чистый! Скрытых символов не найдено.',
-        'hidden_found': '🔍 Найдено скрытых символов: {count}\n\n📄 Фрагмент текста:\n{preview}\n\n💰 Очистить за 10 Stars\n📏 Длина: {length} знаков',
-        'clean_button': '✨ Очистить за 10 Stars',
-        'clean_placeholder': '🧹 Очистка будет доступна после подключения Stars.',
+        'hidden_found': (
+            "🔍 Найдено скрытых символов: {count}\n\n"
+            "📄 Фрагмент текста:\n{preview}\n\n"
+            "💰 Очистка будет стоить {price} Stars.\n"
+            "📏 Длина: {length} знаков"
+        ),
+        'clean_button': '✨ Очистить за {price} Stars',
+        'payment_success': (
+            "✅ Оплата прошла успешно!\n"
+            "🧹 Вот очищенный текст:\n\n{cleaned_text}"
+        ),
+        'payment_failed': '❌ Ошибка оплаты. Попробуйте ещё раз.',
         'unsupported_format': '❌ Поддерживаются только TXT, DOCX, PDF',
         'extract_failed': '❌ Не удалось извлечь текст из файла',
         'download_error': '❌ Не удалось скачать файл: {error}',
@@ -55,9 +82,13 @@ TEXTS = {
         'language_selected': '✅ Language set: English',
         'start': (
             "👋 Hello! I'm a bot for cleaning text from hidden characters.\n\n"
-            "📝 Send me text or a file (TXT, DOCX, PDF), and I'll show you the number of hidden characters.\n\n"
-            "💰 Text cleaning — 10 Stars (up to 1000 characters)\n\n"
-            "📁 Files up to 5 MB are processed quickly, from 5 to 20 MB — in the background (please wait).\n"
+            "📝 Send me text or a file (TXT, DOCX, PDF), and I'll show the number of hidden characters.\n\n"
+            "💰 Pricing:\n"
+            "• Check & clean up to 500 chars — **free**\n"
+            "• Up to 1000 chars — 1 Star\n"
+            "• 1000–10000 chars — 10 Stars\n"
+            "• More than 10000 chars — 50 Stars\n\n"
+            "📁 Files up to 5 MB are processed quickly, from 5 to 20 MB — in the background.\n"
             "❌ Files larger than 20 MB are not accepted due to Telegram limitations.\n\n"
             "Use /help for command list."
         ),
@@ -69,7 +100,10 @@ TEXTS = {
             "📌 Just send text or a file, and I'll check for hidden characters."
         ),
         'choose_language': '🌐 Please choose language:',
-        'file_too_big': '❌ File is too large (maximum 20 MB). Please send a smaller file.',
+        'donate_button': '💖 Support the author',
+        'donate_prompt': 'Choose the donation amount in Stars (or /cancel to abort):',
+        'donate_thanks': '🙏 Thank you for your support! You gifted {amount} Stars.',
+        'file_too_big': '❌ File is too large (max 20 MB).',
         'file_big_background': (
             "⏳ File is large (>5 MB). Starting background processing, it may take some time.\n"
             "I'll send the result here when it's done."
@@ -77,9 +111,18 @@ TEXTS = {
         'file_processing': '⏳ Processing file...',
         'text_clean': '✅ Text is clean! No hidden characters found.',
         'file_clean': '✅ File is clean! No hidden characters found.',
-        'hidden_found': '🔍 Hidden characters found: {count}\n\n📄 Text snippet:\n{preview}\n\n💰 Clean for 10 Stars\n📏 Length: {length} characters',
-        'clean_button': '✨ Clean for 10 Stars',
-        'clean_placeholder': '🧹 Cleaning will be available after Stars integration.',
+        'hidden_found': (
+            "🔍 Hidden characters found: {count}\n\n"
+            "📄 Text snippet:\n{preview}\n\n"
+            "💰 Cleaning will cost {price} Stars.\n"
+            "📏 Length: {length} characters"
+        ),
+        'clean_button': '✨ Clean for {price} Stars',
+        'payment_success': (
+            "✅ Payment successful!\n"
+            "🧹 Here is your cleaned text:\n\n{cleaned_text}"
+        ),
+        'payment_failed': '❌ Payment failed. Please try again.',
         'unsupported_format': '❌ Only TXT, DOCX, PDF are supported',
         'extract_failed': '❌ Failed to extract text from file',
         'download_error': '❌ Failed to download file: {error}',
@@ -94,6 +137,17 @@ def get_text(context: ContextTypes.DEFAULT_TYPE, key: str, **kwargs) -> str:
     if kwargs:
         text = text.format(**kwargs)
     return text
+
+def get_price_for_length(length: int) -> int:
+    """Возвращает цену в Stars в зависимости от длины текста."""
+    if length <= PRICE_FREE_LIMIT:
+        return 0
+    elif length <= PRICE_TIER1_LIMIT:
+        return PRICE_TIER1
+    elif length <= PRICE_TIER2_LIMIT:
+        return PRICE_TIER2
+    else:
+        return PRICE_TIER3
 
 # ========== ФУНКЦИИ ОЧИСТКИ ==========
 def clean_text(text):
@@ -167,18 +221,44 @@ async def process_file_background(update: Update, context: ContextTypes.DEFAULT_
             )
             return
 
-        preview = text[:200] + "..." if len(text) > 200 else text
+        length = len(text)
+        price = get_price_for_length(length)
+
+        # Сохраняем текст для последующей обработки (оплаты или бесплатной очистки)
+        context.user_data['pending_text'] = text
+        context.user_data['pending_price'] = price
+        context.user_data['pending_length'] = length
+
+        preview = text[:200] + "..." if length > 200 else text
         reply_text = get_text(
             context,
             'hidden_found',
             count=hidden,
             preview=preview,
-            length=len(text)
+            price=price,
+            length=length
         )
+
+        # Если цена 0, сразу очищаем бесплатно
+        if price == 0:
+            cleaned = clean_text(text)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=get_text(context, 'payment_success', cleaned_text=cleaned)
+            )
+            context.user_data.pop('pending_text', None)
+            return
+
+        # Иначе предлагаем оплатить
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(context, 'clean_button'), callback_data="clean")]])
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    get_text(context, 'clean_button', price=price),
+                    callback_data="pay_clean"
+                )
+            ]])
         )
     except Exception as e:
         logger.exception("Ошибка при фоновой обработке файла")
@@ -216,17 +296,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         keyboard = [
             [InlineKeyboardButton("Русский", callback_data="lang_ru")],
-            [InlineKeyboardButton("English", callback_data="lang_en")]
+            [InlineKeyboardButton("English", callback_data="lang_en")],
+            [InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(intro_text, reply_markup=reply_markup)
     else:
-        await update.message.reply_text(get_text(context, 'start'))
+        keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(get_text(context, 'start'), reply_markup=reply_markup)
 
 async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Русский", callback_data="lang_ru")],
-        [InlineKeyboardButton("English", callback_data="lang_en")]
+        [InlineKeyboardButton("English", callback_data="lang_en")],
+        [InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -235,7 +319,9 @@ async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(get_text(context, 'help'))
+    keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(get_text(context, 'help'), reply_markup=reply_markup)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'language' not in context.user_data:
@@ -247,17 +333,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if hidden == 0:
         await update.message.reply_text(get_text(context, 'text_clean'))
         return
-    preview = text[:200] + "..." if len(text) > 200 else text
+
+    length = len(text)
+    price = get_price_for_length(length)
+
+    context.user_data['pending_text'] = text
+    context.user_data['pending_price'] = price
+    context.user_data['pending_length'] = length
+
+    preview = text[:200] + "..." if length > 200 else text
     reply_text = get_text(
         context,
         'hidden_found',
         count=hidden,
         preview=preview,
-        length=len(text)
+        price=price,
+        length=length
     )
+
+    if price == 0:
+        cleaned = clean_text(text)
+        await update.message.reply_text(get_text(context, 'payment_success', cleaned_text=cleaned))
+        context.user_data.pop('pending_text', None)
+        return
+
     await update.message.reply_text(
         reply_text,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(get_text(context, 'clean_button'), callback_data="clean")]])
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                get_text(context, 'clean_button', price=price),
+                callback_data="pay_clean"
+            )
+        ]])
     )
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,6 +396,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка при скачивании файла")
         await update.message.reply_text(get_text(context, 'download_error', error=str(e)[:100]))
 
+# ========== ОБРАБОТЧИКИ КНОПОК И ПЛАТЕЖЕЙ ==========
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -297,9 +405,91 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = query.data.split('_')[1]
         context.user_data['language'] = lang
         await query.edit_message_text(get_text(context, 'language_selected'))
-        await query.message.reply_text(get_text(context, 'start'))
-    elif query.data == "clean":
-        await query.edit_message_text(get_text(context, 'clean_placeholder'))
+        # После выбора языка показываем приветствие с кнопкой доната
+        keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.reply_text(get_text(context, 'start'), reply_markup=reply_markup)
+        return
+
+    if query.data == "donate":
+        # Показываем inline-кнопки с вариантами доната
+        donate_keyboard = [
+            [InlineKeyboardButton("1 ⭐️", callback_data="donate_1")],
+            [InlineKeyboardButton("5 ⭐️", callback_data="donate_5")],
+            [InlineKeyboardButton("10 ⭐️", callback_data="donate_10")],
+            [InlineKeyboardButton("25 ⭐️", callback_data="donate_25")],
+            [InlineKeyboardButton("50 ⭐️", callback_data="donate_50")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+        ]
+        await query.edit_message_text(
+            get_text(context, 'donate_prompt'),
+            reply_markup=InlineKeyboardMarkup(donate_keyboard)
+        )
+        return
+
+    if query.data.startswith('donate_'):
+        amount = int(query.data.split('_')[1])
+        # Создаём счёт на донат
+        await context.bot.send_invoice(
+            chat_id=query.message.chat_id,
+            title="Поддержка автора",
+            description="Благодарю за ваш вклад!",
+            payload="donation",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Донат", amount=amount)]
+        )
+        # Сообщение о создании счёта – не редактируем предыдущее
+        return
+
+    if query.data == "pay_clean":
+        text = context.user_data.get('pending_text', '')
+        price = context.user_data.get('pending_price', 0)
+        if not text:
+            await query.edit_message_text("❌ Ошибка: текст не найден. Отправьте текст заново.")
+            return
+
+        await context.bot.send_invoice(
+            chat_id=query.message.chat_id,
+            title="Очистка текста",
+            description="Удаление скрытых символов",
+            payload="clean_text",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Очистка", amount=price)]
+        )
+        return
+
+    if query.data == "back":
+        # Возврат в главное меню
+        keyboard = [[InlineKeyboardButton(get_text(context, 'donate_button'), callback_data="donate")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(get_text(context, 'start'), reply_markup=reply_markup)
+        return
+
+async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение готовности к оплате"""
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Что делать после успешной оплаты"""
+    payload = update.message.successful_payment.invoice_payload
+    if payload == "donation":
+        amount = update.message.successful_payment.total_amount
+        await update.message.reply_text(
+            get_text(context, 'donate_thanks', amount=amount)
+        )
+    elif payload == "clean_text":
+        text = context.user_data.get('pending_text', '')
+        if not text:
+            await update.message.reply_text("❌ Ошибка: текст не найден. Отправьте текст заново.")
+            return
+        cleaned = clean_text(text)
+        await update.message.reply_text(
+            get_text(context, 'payment_success', cleaned_text=cleaned)
+        )
+        context.user_data.pop('pending_text', None)
 
 # ========== ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ==========
 async def main():
@@ -312,6 +502,8 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
 
     # Запускаем веб-сервер
     web_runner = await run_web_server()
